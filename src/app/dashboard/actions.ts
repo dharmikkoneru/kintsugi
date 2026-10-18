@@ -2,7 +2,8 @@
 
 import { revalidatePath } from "next/cache";
 
-import { currentUserId, getDb } from "@/lib/db";
+import { requireUserId } from "@/lib/auth";
+import { getDb } from "@/lib/db";
 import { setGhostDay, toggleHabit, type MutationResult } from "@/lib/mutations";
 import { asUser } from "@/lib/scope";
 
@@ -19,8 +20,8 @@ export async function toggleHabitAction(
   }
 
   try {
+    const userId = await requireUserId();
     const db = await getDb();
-    const userId = await currentUserId(db);
     const result = await asUser(db, userId, (client) =>
       toggleHabit(client, habitId, isoDay, completed),
     );
@@ -44,13 +45,51 @@ export async function setGhostDayAction(
   }
 
   try {
+    const userId = await requireUserId();
     const db = await getDb();
-    const userId = await currentUserId(db);
     const result = await asUser(db, userId, (client) =>
       setGhostDay(client, isoDay, isGhost),
     );
     if (result.ok) revalidatePath("/dashboard");
     return result;
+  } catch (error) {
+    return {
+      ok: false,
+      reason: error instanceof Error ? error.message : "The write failed.",
+    };
+  }
+}
+
+/** First-run setup: creates the account's three habits and today's rows. */
+export async function createInitialHabitsAction(
+  labels: string[],
+): Promise<ActionState> {
+  const cleaned = labels.map((label) => label.trim()).filter(Boolean).slice(0, 3);
+  if (cleaned.length === 0) {
+    return { ok: false, reason: "Give at least the keystone habit a name." };
+  }
+
+  try {
+    const userId = await requireUserId();
+    const db = await getDb();
+    await asUser(db, userId, async (client) => {
+      for (const [index, label] of cleaned.entries()) {
+        const { rows } = await client.query<{ id: string }>(
+          `INSERT INTO habits (user_id, label, is_keystone)
+           VALUES ($1, $2, $3) RETURNING id`,
+          [userId, label, index === 0],
+        );
+        // Today exists as a row from the start, so the board renders the
+        // current day immediately.
+        await client.query(
+          `INSERT INTO daily_logs (habit_id, day, completed)
+           VALUES ($1, current_date, false)`,
+          [rows[0].id],
+        );
+      }
+    });
+    revalidatePath("/dashboard");
+    return { ok: true };
   } catch (error) {
     return {
       ok: false,

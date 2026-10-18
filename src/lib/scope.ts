@@ -12,7 +12,6 @@
 // Both steps are transaction-local (`SET LOCAL`, `set_config(..., true)`), so a
 // pooled or shared connection can serve two accounts without leaking between
 // them.
-import type { PGlite } from "@electric-sql/pglite";
 
 /** The slice of a database handle the rules need. Satisfied by PGlite and by a
  * PGlite transaction, so callers pass whichever context they already have. */
@@ -22,6 +21,16 @@ export interface SqlClient {
     params?: unknown[],
   ): Promise<{ rows: T[] }>;
   exec(sql: string): Promise<unknown>;
+}
+
+/** A database handle. Satisfied by PGlite and by the Postgres pool adapter in
+ * db.ts, so the scoping rules run identically against either backend. */
+export interface Db {
+  query<T = Record<string, unknown>>(
+    sql: string,
+    params?: unknown[],
+  ): Promise<{ rows: T[] }>;
+  transaction<T>(fn: (client: SqlClient) => Promise<T>): Promise<T>;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -45,13 +54,13 @@ async function assumeIdentity(client: SqlClient, userId: string): Promise<void> 
  * writes more than once and must not half-apply.
  */
 export async function asUser<T>(
-  db: PGlite,
+  db: Db,
   userId: string,
   fn: (client: SqlClient) => Promise<T>,
 ): Promise<T> {
   assertUserId(userId);
   return db.transaction(async (tx) => {
-    const client = tx as unknown as SqlClient;
+    const client = tx as SqlClient;
     await assumeIdentity(client, userId);
     return fn(client);
   });
@@ -62,12 +71,12 @@ export async function asUser<T>(
  * Convenient for read paths and tests, where atomicity across calls is not
  * needed; prefer `asUser` for multi-statement writes.
  */
-export function userClient(db: PGlite, userId: string): SqlClient {
+export function userClient(db: Db, userId: string): SqlClient {
   assertUserId(userId);
   return {
     async query<T = Record<string, unknown>>(sql: string, params?: unknown[]) {
       return db.transaction(async (tx) => {
-        const client = tx as unknown as SqlClient;
+        const client = tx as SqlClient;
         await assumeIdentity(client, userId);
         const result = await client.query<T>(sql, params);
         return { rows: result.rows };
@@ -75,7 +84,7 @@ export function userClient(db: PGlite, userId: string): SqlClient {
     },
     async exec(sql: string) {
       return db.transaction(async (tx) => {
-        const client = tx as unknown as SqlClient;
+        const client = tx as SqlClient;
         await assumeIdentity(client, userId);
         return client.exec(sql);
       });

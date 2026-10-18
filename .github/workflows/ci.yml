@@ -21,6 +21,9 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Typecheck
+        run: npm run typecheck
+
       # Schema, read path, and write path — each spins up its own in-process
       # Postgres (PGlite), so no services are needed.
       - name: Schema rules

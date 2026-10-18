@@ -4,14 +4,21 @@ Everything in the app is finished and verified locally. What's left needs an
 account, a credential, a decision, or a network this machine can't reach.
 
 Current state, for orientation: the dashboard runs at
-`http://127.0.0.1:3222/dashboard` (production build), the four test suites pass,
-ESLint and `next build` are clean, and **the folder is not a git repository yet**
-(no `.git`, no remote).
+`http://127.0.0.1:3111/dashboard` (production build), and there are now seven
+test suites, all passing: `test:week` (8), `test:mutations` (5), `test:schema`
+(11), `test:interactions` (9, Chromium), `test:dashboard` (Chromium),
+`test:supabase` (5, real Supabase RLS isolation) and `test:accounts` (9,
+Chromium against a real Supabase account). ESLint, `tsc` and `next build` are
+clean.
 
-**Status:** steps 1 and 2 are done. The repo is public at
-<https://github.com/dharmikkoneru/kintsugi>, and CI run #2 on `14aac26` passed
-every step — install, lint, the three database suites, build, Chromium install,
-and both browser suites — on a clean Ubuntu runner. Steps 3 onward are open.
+**Status:** steps 1–4 are done. Supabase accounts are fully wired: sign-in
+(magic link + 6-digit code), first-run habit creator, auth-gated dashboard,
+PWA manifest and icons. `src/lib/db.ts` uses Postgres when `DATABASE_URL` is
+set (and `KINTSUGI_DB=pglite` forces demo mode for offline browser tests),
+`prisma/schema.sql` is applied to the live project, and `verify-schema.mjs`
+plus `verify-supabase.mjs` prove from the database's side that one account
+sees nothing of another and cannot write into it. Remaining: deploy (step 5)
+and device QA (step 6).
 
 Do these in order. Each one unblocks the next.
 
@@ -48,10 +55,10 @@ git remote add origin https://github.com/<your-user>/kintsugi.git
 git push -u origin main
 ```
 
-CI runs on push to `main` and on pull requests: install → lint → schema, week
-and mutation tests → `next build` → both Chromium suites against a server it
-starts itself. No secrets are needed. Watch the Actions tab; if a step fails
-there that passed here, the cause is almost certainly step 2.
+CI runs on push to `main` and on pull requests: install → lint → typecheck →
+schema, week and mutation tests → `next build` → both Chromium suites against a
+server it starts itself. No secrets are needed: without Supabase env vars the
+app and middleware fall back to local PGlite demo mode, which the suites cover.
 
 ---
 
@@ -80,7 +87,7 @@ npx playwright install chromium
 
 ---
 
-## 3. Decide: single-user, or accounts from day one (one word)
+## 3. Decide: single-user, or accounts from day one — DECIDED: accounts — DONE
 
 This is the only product decision blocking real work, and it changes onboarding
 and the database policies, not just a login screen.
@@ -93,44 +100,25 @@ and the database policies, not just a login screen.
   to create your own habits instead of the seeded demo week. Roughly a day of my
   work, none of it from you beyond the project in step 4.
 
-Reply with `single-user` or `accounts`. **Recommended: accounts** — retrofitting
-`user_id` and RLS after habits exist means a data migration on live rows.
+Built and verified: sign-in page (magic link and 6-digit code), `/auth/callback`
+and `/auth/confirm` routes, session refresh in middleware, `requireUserId()`
+guarding the dashboard and server actions, first-run creator, and the SSR
+cookie flow exercised end-to-end by `test:accounts`.
 
 ---
 
-## 4. Create the Supabase project (10 min, free tier)
+## 4. Create the Supabase project (10 min, free tier) — DONE
 
-I cannot create an account or a project for you. Do this only if you chose
-accounts, or if you want a real deployment (see step 5).
+The project is provisioned, `.env.local` is in place (Supabase URL, publishable
+key, pooled `DATABASE_URL`), `prisma/schema.sql` is applied, and both
+`test:supabase` and `test:accounts` pass against it. Two implementation notes,
+kept for the record:
 
-1. Go to <https://supabase.com/dashboard>, sign in with GitHub.
-2. **New project** → organization: personal → name: `kintsugi` → region: closest
-   to you → **Generate a password** and save it in your password manager. It is
-   shown once and you need it in step 4.5.
-3. Wait for provisioning (~2 min).
-4. **Project Settings → Database → Connection string → URI.** Use the
-   **connection pooler** host (`...pooler.supabase.com`, port `6543`) — the
-   direct connection on `5432` will exhaust connections from serverless
-   functions. Replace `[YOUR-PASSWORD]` with the saved password and make sure
-   the URL ends with `?sslmode=require`.
-5. **Project Settings → API:** copy the **Project URL** and the **anon public**
-   key. You do not need the service-role key for what's planned — every query
-   will be scoped by the signed-in user via RLS instead.
-6. Create `kintsugi/.env.local` (gitignored — **do not paste these in chat**):
-
-   ```
-   DATABASE_URL=postgresql://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:6543/postgres?sslmode=require
-   NEXT_PUBLIC_SUPABASE_URL=https://<ref>.supabase.co
-   NEXT_PUBLIC_SUPABASE_ANON_KEY=<anon public key>
-   ```
-
-7. Tell me **"env ready"**.
-
-I'll take it from there: swap `connect()` in `src/lib/db.ts` for a Postgres
-client, run `prisma/schema.sql` against the project, add `user_id` and the RLS
-policies, wire Supabase auth and the sign-in route, replace the demo seed with a
-first-run habit creator, and re-run all four suites against the real database
-plus a two-account isolation test. You won't need to touch SQL.
+- `sslmode=require` makes modern `pg` verify the full chain, which fails against
+  Supabase's pooler certificate locally; `PgDb` strips the parameter and uses
+  `ssl: { rejectUnauthorized: false }`.
+- GoTrue scans `auth.users.created_at`/`updated_at` into non-nullable fields, so
+  hand-inserted test users (in `verify-accounts.mjs`) must set them explicitly.
 
 **Free-tier cautions worth knowing now:** idle projects pause after about a week
 with no traffic (the first request afterwards is slow, and scheduled jobs stop),
@@ -139,25 +127,30 @@ history starts to matter, I'll add a nightly export.
 
 ---
 
-## 5. Deploy (10 min) — do step 4 first
+## 5. Deploy (10 min)
 
-**Do not deploy to Vercel before the Supabase swap.** PGlite keeps the database
-in a local file, and serverless filesystems are ephemeral, so a Vercel deploy
-today would reseed a fresh demo week on every cold start. Deploying first is only
-sensible if you instead put this on a single always-on machine (a VPS or a
-Raspberry Pi with `npm run build && npm run start` behind Caddy) — the same
-PGlite code works unchanged there.
-
-Once step 4 is done:
+The Supabase swap is done, so Vercel is now safe. (Before the swap, PGlite kept
+the database in a local file and serverless filesystems are ephemeral, so a
+deploy would have reseeded a fresh demo week on every cold start.)
 
 1. <https://vercel.com/new> → import the GitHub repo from step 1.
 2. Framework is detected as Next.js. Leave build settings alone.
-3. **Environment Variables** → add the same three names from step 4.5, for
-   Production, Preview and Development. Values must not be quoted.
-4. Deploy, then open the URL and tell me it's live — I'll run the browser
+3. **Environment Variables** → add the same three names from `.env.local`, for
+   Production, Preview and Development:
+
+   ```
+   DATABASE_URL
+   NEXT_PUBLIC_SUPABASE_URL
+   NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+   ```
+
+   Values must not be quoted.
+4. In Supabase → **Authentication → URL Configuration**, add the Vercel domain
+   to **Site URL / Redirect URLs** so the magic-link callback can return there.
+5. Deploy, then open the URL and tell me it's live — I'll run the browser
    suites against the real domain, check console/network errors and the auth
    flow, and tell you what's actually broken rather than assuming it's fine.
-5. Optional: Settings → Domains for a custom domain.
+6. Optional: Settings → Domains for a custom domain.
 
 ---
 
@@ -169,22 +162,28 @@ Local tests use headless Chromium at fixed viewports. Real phones differ.
   persisted. Rotate the device. Confirm no sideways scrolling.
 - Tap `pause` on a day, reload, then `resume`: the week total must come back to
   exactly what it was.
-- Add to home screen (Safari → Share → Add to Home Screen). There is no web app
-  manifest or icon set yet, so it will install as a plain page — say the word and
-  I'll add a manifest, icons and an offline shell.
-- After accounts exist: sign in on two devices, toggle on one, refresh the other;
-  then sign in as a second account and confirm it sees none of the first's rows.
+- Add to home screen (Safari → Share → Add to Home Screen): the manifest and
+  icon set now exist, so it should install with the proper name and icon — no
+  address bar. Confirm it looks right and that the theme color fits.
+- Sign in on two devices with the same account, toggle on one, refresh the
+  other; then sign in as a second account and confirm it sees none of the
+  first's rows.
+- On your own account: sign in via magic link, run the first-run creator, and
+  confirm the email arrives (free-tier email sends are rate-limited to a couple
+  per hour, so don't spam the sign-in button).
 
 ---
 
 ## What I need from you, in the fewest possible words
 
-1. `git push` (step 1) — I don't commit or push without being asked.
-2. The `npm ci` result (step 2).
-3. One word: `single-user` or `accounts` (step 3).
-4. "env ready" once `.env.local` exists (step 4).
-5. "deployed" once Vercel gives you a URL (step 5).
+1. **Rotate the database password.** It was pasted in chat, so it should be
+   considered exposed: Supabase → Project Settings → Database → Reset database
+   password, then update `DATABASE_URL` in `.env.local` (local only for now).
+2. Try `/sign-in` yourself once (magic link) and say "works" or describe what
+   happens.
+3. `git push` when you're happy with the diff — I don't commit or push without
+   being asked. All account work is uncommitted on top of `fa48928`.
+4. "deployed" once Vercel gives you a URL (step 5).
 
-Nothing else in the app is waiting on you. The three known gaps — no accounts,
-no first-run habit creation, no web app manifest — are all things I can build the
-moment you answer item 3.
+Nothing else in the app is waiting on you. Accounts, first-run habit creation,
+and the web app manifest are all built and verified.

@@ -1,10 +1,17 @@
-// Data layer. Today it runs Postgres in-process via PGlite (WASM, file-backed
-// at .data/pg) so the app works offline and a fresh clone needs no service.
-// Swapping in Supabase means replacing `connect()` with a pg/postgres client —
-// every query below is plain SQL and stays as it is.
+// Data layer. Two backends behind one handle:
+//
+//   - DATABASE_URL set → Postgres (Supabase). The app is multi-user: every
+//     query runs as the signed-in account under RLS.
+//   - DATABASE_URL absent (or KINTSUGI_DB=pglite) → PGlite (WASM, file-backed
+//     at .data/pg), seeded with a demo week. Used by the test suites, CI and
+//     offline development; no account is required.
+//
+// Either way every query below is plain SQL and the scoping rules in scope.ts
+// put the connection into Supabase's authenticated posture.
 import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { PGlite } from "@electric-sql/pglite";
+import pg from "pg";
 
 import {
   assembleWeek,
@@ -12,16 +19,86 @@ import {
   type RawLogRow,
   type Week,
 } from "./week.ts";
-import { asUser, type SqlClient } from "./scope.ts";
+import { asUser, type Db, type SqlClient } from "./scope.ts";
 
 const DATA_DIR = path.join(process.cwd(), ".data", "pg");
 const SCHEMA_FILE = path.join(process.cwd(), "prisma", "schema.sql");
 
+const DATABASE_URL = process.env.DATABASE_URL;
+
+/** Which backend this process runs against. KINTSUGI_DB=pglite forces the
+ * local demo database — the browser suites use it so a machine with
+ * DATABASE_URL in .env.local still runs them against the seeded demo week. */
+export const usesPostgres = Boolean(DATABASE_URL) && process.env.KINTSUGI_DB !== "pglite";
+
 declare global {
-  // Survives dev-server hot reloads, which would otherwise reopen the database
-  // on every module update.
-  var __kintsugiDb: Promise<PGlite> | undefined;
+  // Survives dev-server hot reloads, which would otherwise open the database
+  // again on every module update.
+  var __kintsugiDb: Promise<Db> | undefined;
 }
+
+// ── Postgres backend (Supabase) ─────────────────────────────────────────
+
+class PgDb implements Db {
+  readonly pool: pg.Pool;
+
+  constructor(connectionString: string) {
+    const url = new URL(connectionString);
+    // pg >= 2.7 treats sslmode=require as verify-full, which fails behind
+    // local TLS interception and differs from what libpq (and Supabase's own
+    // docs) mean by "require": encrypt, but do not verify the chain. Strip the
+    // parameter and say that explicitly.
+    url.searchParams.delete("sslmode");
+    this.pool = new pg.Pool({
+      connectionString: url.toString(),
+      ssl: { rejectUnauthorized: false },
+      max: 5,
+    });
+  }
+
+  async query<T = Record<string, unknown>>(sql: string, params?: unknown[]) {
+    const result = await this.pool.query(sql, params as unknown[]);
+    return { rows: result.rows as T[] };
+  }
+
+  async transaction<T>(fn: (client: SqlClient) => Promise<T>): Promise<T> {
+    const client = await this.pool.connect();
+    const sql: SqlClient = {
+      async query<R = Record<string, unknown>>(text: string, params?: unknown[]) {
+        const result = await client.query(text, params as unknown[]);
+        return { rows: result.rows as R[] };
+      },
+      async exec(text: string) {
+        await client.query(text);
+        return undefined;
+      },
+    };
+    try {
+      await client.query("BEGIN");
+      const value = await fn(sql);
+      await client.query("COMMIT");
+      return value;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /** Closes the pool. For scripts, which must let Node exit. */
+  async end(): Promise<void> {
+    await this.pool.end();
+  }
+}
+
+/** A Postgres-backed handle. Exported for scripts that manage the real
+ * database (applying the schema, isolation checks). */
+export function createPgDb(connectionString: string): PgDb {
+  return new PgDb(connectionString);
+}
+
+// ── PGlite backend (tests, CI, offline dev) ─────────────────────────────
 
 const ALL = ["Morning meditation", "Read 10 pages", "Evening walk"];
 const KEYSTONE_ONLY = ["Morning meditation"];
@@ -99,7 +176,7 @@ async function seedIfEmpty(db: PGlite): Promise<string | null> {
 }
 
 /** Applies prisma/schema.sql. Re-runnable: the schema drops its triggers first. */
-export async function migrate(db: PGlite): Promise<void> {
+export async function migrate(db: { exec(sql: string): Promise<unknown> }): Promise<void> {
   await db.exec(readFileSync(SCHEMA_FILE, "utf8"));
 }
 
@@ -108,7 +185,7 @@ export async function seedDemoWeek(db: PGlite): Promise<string | null> {
   return seedIfEmpty(db);
 }
 
-async function connect(): Promise<PGlite> {
+async function connectPGlite(): Promise<Db> {
   // PGlite creates its data directory but not the parents, so make the path
   // first; the data dir is gitignored and rebuilt by the seed when missing.
   mkdirSync(DATA_DIR, { recursive: true });
@@ -118,7 +195,18 @@ async function connect(): Promise<PGlite> {
   return db;
 }
 
-export function getDb(): Promise<PGlite> {
+// ── The handle the app uses ─────────────────────────────────────────────
+
+async function connect(): Promise<Db> {
+  if (usesPostgres) {
+    // The schema is applied by scripts/apply-schema.mjs; a real account's data
+    // is never seeded.
+    return createPgDb(DATABASE_URL!);
+  }
+  return connectPGlite();
+}
+
+export function getDb(): Promise<Db> {
   globalThis.__kintsugiDb ??= connect().catch((error) => {
     // Never cache a failed connection: the next request should retry.
     globalThis.__kintsugiDb = undefined;
@@ -126,6 +214,8 @@ export function getDb(): Promise<PGlite> {
   });
   return globalThis.__kintsugiDb;
 }
+
+// ── Queries ─────────────────────────────────────────────────────────────
 
 // Dates are formatted in SQL so a DATE never travels through a
 // timezone-sensitive JavaScript Date.
@@ -193,20 +283,8 @@ export async function loadWeekFrom(db: SqlClient): Promise<Week> {
   return { ...current, previousWeekScore };
 }
 
-/** The account the request is acting as. Until auth lands, the app is
- * single-user and this resolves to the seeded row; the auth swap replaces this
- * one function with the session lookup. */
-export async function currentUserId(db: PGlite): Promise<string> {
-  const { rows } = await db.query<{ id: string }>(
-    "SELECT id FROM users ORDER BY created_at LIMIT 1",
-  );
-  if (!rows[0]) throw new Error("No account exists yet.");
-  return rows[0].id;
-}
-
-/** loadWeek() against the app's own connection, scoped to the signed-in user. */
-export async function loadWeek(): Promise<Week> {
+/** loadWeek() against the app's own connection, scoped to the given account. */
+export async function loadWeek(userId: string): Promise<Week> {
   const db = await getDb();
-  const userId = await currentUserId(db);
   return asUser(db, userId, (client) => loadWeekFrom(client));
 }

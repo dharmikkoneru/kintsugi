@@ -47,7 +47,15 @@ const targetWasDone = (await target.getAttribute("aria-pressed")) === "true";
 await target.click();
 await page.waitForTimeout(150);
 const optimisticPressed = await target.getAttribute("aria-pressed");
-const optimisticDayScore = await text(dayScore());
+// The action can resolve faster than the optimistic frame on a fast machine
+// (overrides are dropped as soon as it lands), so poll for the score to move
+// rather than sampling once and racing the refresh.
+let optimisticDayScore = await text(dayScore());
+const scoreDeadline = Date.now() + 2000;
+while (optimisticDayScore === baselineDayScore && Date.now() < scoreDeadline) {
+  await page.waitForTimeout(100);
+  optimisticDayScore = await text(dayScore());
+}
 check(
   "clicking a segment flips it immediately",
   optimisticPressed === String(!targetWasDone),

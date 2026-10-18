@@ -7,27 +7,33 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "typecheck": "tsc --noEmit",
     "test:week": "node --test scripts/verify-week.mjs",
     "test:mutations": "node --test scripts/verify-mutations.mjs",
     "test:interactions": "node scripts/verify-interactions.mjs",
     "test:schema": "node --test scripts/verify-schema.mjs",
-    "test:dashboard": "node scripts/verify-dashboard.mjs"
+    "test:dashboard": "node scripts/verify-dashboard.mjs",
+    "test:supabase": "node scripts/verify-supabase.mjs",
+    "test:accounts": "node scripts/verify-accounts.mjs"
   },
   "dependencies": {
+    "@supabase/ssr": "^0.12.7",
+    "@supabase/supabase-js": "^2.118.0",
     "next": "16.4.2",
+    "pg": "^8.23.1",
     "react": "19.3.0",
-    "react-dom": "19.3.0",
-    "@supabase/supabase-js": "^2"
+    "react-dom": "19.3.0"
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.10",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
+    "@types/pg": "^8.23.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
+    "eslint-config-next": "^16.4.2",
     "playwright": "^1.64.1",
-    "eslint-config-next": "16.4.2",
     "tailwindcss": "^4",
     "typescript": "^5"
   }
