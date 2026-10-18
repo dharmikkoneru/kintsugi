@@ -17,10 +17,32 @@ PWA manifest and icons. `src/lib/db.ts` uses Postgres when `DATABASE_URL` is
 set (and `KINTSUGI_DB=pglite` forces demo mode for offline browser tests),
 `prisma/schema.sql` is applied to the live project, and `verify-schema.mjs`
 plus `verify-supabase.mjs` prove from the database's side that one account
-sees nothing of another and cannot write into it. Remaining: deploy (step 5)
-and device QA (step 6).
+sees nothing of another and cannot write into it. CI is green on `1841faf`
+(every step: install, lint, typecheck, the three database suites, build,
+Chromium, both browser suites). Remaining: deploy (step 5) and device QA
+(step 6).
 
 Do these in order. Each one unblocks the next.
+
+---
+
+## 0. Lockfile rule — read before touching dependencies
+
+The lockfile was hand-repaired in `14aac26` (and again in `1841faf`) to carry
+`node_modules/@emnapi/core@1.11.3` and `node_modules/@emnapi/runtime@1.11.3`
+(optional wasm dependencies of `sharp` and `tailwindcss/oxide`). The GitHub
+runner's npm (11.19+) requires those entries; the local npm on this machine
+(11.6.1) silently prunes them whenever it rewrites the lock, and the next CI
+run then dies at `Install` with `npm error Missing: @emnapi/...`. **After any
+dependency change, before pushing, verify the lock with the same npm CI uses:**
+
+```powershell
+npx -y npm@11.19.0 ci --dry-run
+```
+
+If it prints a `Missing: @emnapi/...` error, re-add the two entries (they must
+keep the integrity hashes already in git history — `git show 1841faf --
+package-lock.json`) or regenerate the lock with npm 11.19.0 itself.
 
 ---
 
