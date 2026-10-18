@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      # Schema, read path, and write path — each spins up its own in-process
+      # Postgres (PGlite), so no services are needed.
+      - name: Schema rules
+        run: npm run test:schema
+
+      - name: Read path
+        run: npm run test:week
+
+      - name: Write path
+        run: npm run test:mutations
+
+      - name: Build
+        run: npm run build
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      # The browser suites need a server. The first request creates and seeds
+      # .data/pg, so the run starts from a known week.
+      - name: Browser checks
+        run: |
+          npm run start -- --port 3111 &
+          server_pid=$!
+          code=""
+          for _ in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3111/dashboard || true)
+            [ "$code" = "200" ] && break
+            sleep 1
+          done
+          if [ "$code" != "200" ]; then
+            echo "Server never became ready (last status: $code)"
+            kill "$server_pid" || true
+            exit 1
+          fi
+          KINTSUGI_URL=http://127.0.0.1:3111/dashboard npm run test:dashboard
+          KINTSUGI_URL=http://127.0.0.1:3111/dashboard npm run test:interactions
+          kill "$server_pid"

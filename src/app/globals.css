@@ -1,0 +1,148 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ink: #05081a;
+  --color-panel: #0a1124;
+  --color-panel-2: #0d1630;
+  --color-line: #1a2440;
+  --color-mist: #9aa8c0;
+  --color-dim: #5f6f8f;
+  --color-gold: #ffd166;
+  --color-gold-deep: #b8860b;
+  --color-jade: #5eead4;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    color-scheme: dark;
+    scrollbar-color: #1a2440 #05081a;
+  }
+
+  body {
+    min-height: 100%;
+    background-color: var(--color-ink);
+    background-image:
+      radial-gradient(
+        900px 520px at 12% -8%,
+        rgba(255, 209, 102, 0.09),
+        transparent 62%
+      ),
+      radial-gradient(
+        760px 460px at 100% 4%,
+        rgba(58, 90, 180, 0.16),
+        transparent 60%
+      );
+    background-attachment: fixed;
+    color: #e6ecf7;
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::selection {
+    background: rgba(255, 209, 102, 0.28);
+    color: #fff;
+  }
+
+  :focus-visible {
+    outline: 2px solid rgba(255, 209, 102, 0.7);
+    outline-offset: 2px;
+  }
+}
+
+/* Component classes live in the components layer so Tailwind utilities can
+   still override them (unlayered CSS would beat every utility). */
+@layer components {
+  /* Small uppercase section label used across the dashboard. */
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--color-dim);
+  }
+
+  /* ── Ghost day: diagonal hatch, deliberately "not counted". ────────── */
+  .ghost-hatch {
+    background-color: #0b1428;
+    background-image:
+      repeating-linear-gradient(
+        45deg,
+        rgba(154, 168, 192, 0.16) 0px,
+        rgba(154, 168, 192, 0.16) 1px,
+        transparent 1px,
+        transparent 7px
+      ),
+      linear-gradient(90deg, rgba(255, 209, 102, 0.04), transparent 60%);
+  }
+
+  /* ── Keystone: the 50%-wide gold core of every daily stack. ────────── */
+  .keystone-fill {
+    background-image: linear-gradient(
+      100deg,
+      #8a6508 0%,
+      #d9a62e 22%,
+      #ffd166 46%,
+      #ffe9a8 52%,
+      #ffd166 60%,
+      #c9922a 82%,
+      #8a6508 100%
+    );
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.5),
+      inset 0 -1px 0 rgba(0, 0, 0, 0.4),
+      inset 0 0 22px rgba(255, 209, 102, 0.35);
+  }
+
+  /* Requires a positioned ancestor (the element carries Tailwind's
+     `absolute` + `overflow-hidden`), so this class sets neither. */
+  .keystone-sheen::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      100deg,
+      transparent 20%,
+      rgba(255, 255, 255, 0.5) 50%,
+      transparent 80%
+    );
+    transform: translateX(-120%);
+    animation: keystone-sheen 5.2s ease-in-out infinite;
+    pointer-events: none;
+  }
+
+  /* ── 85% target: the line to aim for, not the ceiling. ─────────────── */
+  .target-line {
+    background: linear-gradient(
+      to bottom,
+      rgba(255, 209, 102, 0.15),
+      rgba(255, 209, 102, 0.9),
+      rgba(255, 209, 102, 0.15)
+    );
+    box-shadow: 0 0 10px rgba(255, 209, 102, 0.5);
+  }
+}
+
+@keyframes keystone-sheen {
+  0%,
+  62% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(120%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .keystone-sheen::after {
+    animation: none;
+    opacity: 0;
+  }
+}
