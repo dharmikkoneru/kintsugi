@@ -20,22 +20,22 @@ There is no repository here, so `.github/workflows/ci.yml` has never run.
 cd kintsugi
 git init -b main
 git add .
+# Confirm nothing private is staged — this must print nothing:
+git status --short | grep -E "\.data|\.env"
 git commit -m "Kintsugi habit tracker MVP"
 ```
 
-Before committing, confirm nothing private is staged:
-
-```bash
-git status --short | grep -E "\.data|\.env"   # must print nothing
-```
-
-`.gitignore` already covers `.data/`, `.env*`, `.next/`, `node_modules/`.
+`.gitignore` already covers `.data/`, `.env*`, `.next/`, `node_modules/`, so
+the commit should be a few dozen files rather than thousands.
 
 Then create an **empty** repo on GitHub (no README, no .gitignore — both exist
-here) and push:
+here) and push over HTTPS. This machine has no SSH key (`ssh -T git@github.com`
+returns `Permission denied (publickey)`), so the `git@github.com:` form will
+fail; use the HTTPS remote and let Git Credential Manager open a browser to
+authorize the first push.
 
 ```bash
-git remote add origin git@github.com:<your-user>/kintsugi.git
+git remote add origin https://github.com/<your-user>/kintsugi.git
 git push -u origin main
 ```
 
