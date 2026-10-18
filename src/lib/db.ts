@@ -12,6 +12,7 @@ import {
   type RawLogRow,
   type Week,
 } from "./week.ts";
+import { asUser, type SqlClient } from "./scope.ts";
 
 const DATA_DIR = path.join(process.cwd(), ".data", "pg");
 const SCHEMA_FILE = path.join(process.cwd(), "prisma", "schema.sql");
@@ -51,11 +52,16 @@ const SEED_HABITS = [
   { label: ALL[2], short: "Walk", keystone: false },
 ];
 
-async function seedIfEmpty(db: PGlite): Promise<void> {
+async function seedIfEmpty(db: PGlite): Promise<string | null> {
   const { rows } = await db.query<{ n: number }>(
     "SELECT COUNT(*)::int AS n FROM habits",
   );
-  if ((rows[0]?.n ?? 0) > 0) return;
+  if ((rows[0]?.n ?? 0) > 0) {
+    const existing = await db.query<{ id: string }>(
+      "SELECT id FROM users ORDER BY created_at LIMIT 1",
+    );
+    return existing.rows[0]?.id ?? null;
+  }
 
   const {
     rows: [{ id: userId }],
@@ -88,6 +94,8 @@ async function seedIfEmpty(db: PGlite): Promise<void> {
       );
     }
   }
+
+  return userId;
 }
 
 /** Applies prisma/schema.sql. Re-runnable: the schema drops its triggers first. */
@@ -95,9 +103,9 @@ export async function migrate(db: PGlite): Promise<void> {
   await db.exec(readFileSync(SCHEMA_FILE, "utf8"));
 }
 
-/** Inserts the demo week once; a no-op on every later call. */
-export async function seedDemoWeek(db: PGlite): Promise<void> {
-  await seedIfEmpty(db);
+/** Inserts the demo week once; a no-op on every later call. Returns the owner. */
+export async function seedDemoWeek(db: PGlite): Promise<string | null> {
+  return seedIfEmpty(db);
 }
 
 async function connect(): Promise<PGlite> {
@@ -122,7 +130,7 @@ export function getDb(): Promise<PGlite> {
 // Dates are formatted in SQL so a DATE never travels through a
 // timezone-sensitive JavaScript Date.
 async function queryLogs(
-  db: PGlite,
+  db: SqlClient,
   fromOffset: number,
   toOffset: number,
 ): Promise<RawLogRow[]> {
@@ -142,6 +150,7 @@ async function queryLogs(
      FROM daily_logs dl
      JOIN habits h ON h.id = dl.habit_id
      WHERE dl.day BETWEEN current_date + $1::int AND current_date + $2::int
+       AND h.user_id = current_user_id()   -- RLS also enforces this; explicit keeps plans honest
      ORDER BY dl.day, h.is_keystone DESC, h.label`,
     [fromOffset, toOffset],
   );
@@ -149,14 +158,16 @@ async function queryLogs(
 }
 
 async function queryComebacks(
-  db: PGlite,
+  db: SqlClient,
   fromOffset: number,
   toOffset: number,
 ): Promise<Map<string, number>> {
   const { rows } = await db.query<{ iso_day: string; n: number }>(
-    `SELECT to_char(bounced_on, 'YYYY-MM-DD') AS iso_day, COUNT(*)::int AS n
-     FROM bounce_back_events
-     WHERE bounced_on BETWEEN current_date + $1::int AND current_date + $2::int
+    `SELECT to_char(b.bounced_on, 'YYYY-MM-DD') AS iso_day, COUNT(*)::int AS n
+     FROM bounce_back_events b
+     JOIN habits h ON h.id = b.habit_id
+     WHERE b.bounced_on BETWEEN current_date + $1::int AND current_date + $2::int
+       AND h.user_id = current_user_id()
      GROUP BY 1`,
     [fromOffset, toOffset],
   );
@@ -167,7 +178,7 @@ async function queryComebacks(
  * The last seven days for every habit, including ghost rows. Takes the
  * connection so tests can run it against their own Postgres.
  */
-export async function loadWeekFrom(db: PGlite): Promise<Week> {
+export async function loadWeekFrom(db: SqlClient): Promise<Week> {
   const current = assembleWeek(
     await queryLogs(db, -6, 0),
     await queryComebacks(db, -6, 0),
@@ -182,7 +193,20 @@ export async function loadWeekFrom(db: PGlite): Promise<Week> {
   return { ...current, previousWeekScore };
 }
 
-/** loadWeek() against the app's own connection. */
+/** The account the request is acting as. Until auth lands, the app is
+ * single-user and this resolves to the seeded row; the auth swap replaces this
+ * one function with the session lookup. */
+export async function currentUserId(db: PGlite): Promise<string> {
+  const { rows } = await db.query<{ id: string }>(
+    "SELECT id FROM users ORDER BY created_at LIMIT 1",
+  );
+  if (!rows[0]) throw new Error("No account exists yet.");
+  return rows[0].id;
+}
+
+/** loadWeek() against the app's own connection, scoped to the signed-in user. */
 export async function loadWeek(): Promise<Week> {
-  return loadWeekFrom(await getDb());
+  const db = await getDb();
+  const userId = await currentUserId(db);
+  return asUser(db, userId, (client) => loadWeekFrom(client));
 }

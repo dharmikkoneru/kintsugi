@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import { PGlite } from "@electric-sql/pglite";
 
 import { migrate, seedDemoWeek, loadWeekFrom } from "../src/lib/db.ts";
+import { userClient } from "../src/lib/scope.ts";
 import { eligibleDays, scoreForDay, weekScore } from "../src/lib/week.ts";
 
 let db;
@@ -16,8 +17,9 @@ let week;
 before(async () => {
   db = await PGlite.create(); // in-memory
   await migrate(db);
-  await seedDemoWeek(db);
-  week = await loadWeekFrom(db);
+  const userId = await seedDemoWeek(db);
+  // Reads run as the account, under RLS — not as the owner that seeded the data.
+  week = await loadWeekFrom(userClient(db, userId));
 });
 
 after(async () => {

@@ -2,8 +2,9 @@
 
 import { revalidatePath } from "next/cache";
 
-import { getDb } from "@/lib/db";
+import { currentUserId, getDb } from "@/lib/db";
 import { setGhostDay, toggleHabit, type MutationResult } from "@/lib/mutations";
+import { asUser } from "@/lib/scope";
 
 export type ActionState = MutationResult;
 
@@ -18,7 +19,11 @@ export async function toggleHabitAction(
   }
 
   try {
-    const result = await toggleHabit(await getDb(), habitId, isoDay, completed);
+    const db = await getDb();
+    const userId = await currentUserId(db);
+    const result = await asUser(db, userId, (client) =>
+      toggleHabit(client, habitId, isoDay, completed),
+    );
     if (result.ok) revalidatePath("/dashboard");
     return result;
   } catch (error) {
@@ -39,7 +44,11 @@ export async function setGhostDayAction(
   }
 
   try {
-    const result = await setGhostDay(await getDb(), isoDay, isGhost);
+    const db = await getDb();
+    const userId = await currentUserId(db);
+    const result = await asUser(db, userId, (client) =>
+      setGhostDay(client, isoDay, isGhost),
+    );
     if (result.ok) revalidatePath("/dashboard");
     return result;
   } catch (error) {

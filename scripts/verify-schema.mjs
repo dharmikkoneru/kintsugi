@@ -14,6 +14,8 @@ import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { PGlite } from "@electric-sql/pglite";
 
+import { userClient } from "../src/lib/scope.ts";
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const schema = readFileSync(path.join(here, "..", "prisma", "schema.sql"), "utf8");
 
@@ -180,4 +182,74 @@ test("v_weekly_habit_summary exposes the window with bounce flags", async () => 
     3,
     "the ghost day still appears, flagged",
   );
+});
+
+// ── Per-user isolation ─────────────────────────────────────────────────
+// Everything above ran as the table owner, which bypasses row level security.
+// These run as `authenticated` — the role the app uses — so they exercise the
+// policies themselves rather than the convenience filters in the queries.
+const {
+  rows: [{ id: other }],
+} = await db.query("INSERT INTO users (name) VALUES ($1) RETURNING id", ["Grace"]);
+const otherClient = userClient(db, other);
+const adaClient = userClient(db, user);
+
+test("the owner still sees their own week through the policies", async () => {
+  const { rows } = await adaClient.query("SELECT * FROM v_weekly_habit_summary");
+  assert.equal(rows.length, 21, "own rows pass the policy");
+  const habits = await adaClient.query("SELECT * FROM habits");
+  assert.equal(habits.rows.length, 3);
+});
+
+test("a second account sees none of the first account's rows", async () => {
+  const me = await otherClient.query("SELECT id FROM users");
+  assert.deepEqual(
+    me.rows.map((r) => r.id),
+    [other],
+    "an account can read its own profile row, and only that one",
+  );
+
+  for (const table of [
+    "habits",
+    "daily_logs",
+    "bounce_back_events",
+    "v_weekly_habit_summary",
+  ]) {
+    const { rows } = await otherClient.query(`SELECT * FROM ${table}`);
+    assert.equal(rows.length, 0, `${table} must be empty for an unrelated account`);
+  }
+});
+
+test("a second account cannot write into the first account's history", async () => {
+  await assert.rejects(
+    () =>
+      otherClient.query(
+        "INSERT INTO daily_logs (habit_id, day, completed) VALUES ($1, current_date + 30, TRUE)",
+        [READ.id],
+      ),
+    /row-level security|violates row-level/i,
+    "RLS must reject a log written against someone else's habit",
+  );
+
+  const rows = await many(
+    "SELECT COUNT(*)::int AS n FROM daily_logs WHERE habit_id = $1 AND day = current_date + 30",
+    [READ.id],
+  );
+  assert.equal(rows[0].n, 0, "and nothing landed in the table");
+});
+
+test("a second account cannot pause the first account's day", async () => {
+  await otherClient.query("UPDATE daily_logs SET is_ghost = TRUE WHERE day = current_date");
+  const rows = await many(
+    "SELECT is_ghost FROM daily_logs WHERE habit_id = $1 AND day = current_date",
+    [KEYSTONE.id],
+  );
+  assert.equal(rows[0].is_ghost, false, "the update matched no visible rows");
+});
+
+// Read back in total, as the owner, to be sure the isolation tests did not
+// change the fixture they were meant to observe.
+test("the first account's data is intact after the isolation checks", async () => {
+  const rows = await many("SELECT COUNT(*)::int AS n FROM daily_logs");
+  assert.equal(rows[0].n, 21, "still 7 days × 3 habits");
 });

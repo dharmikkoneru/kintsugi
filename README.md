@@ -88,6 +88,24 @@ ends today. Delete `.data/` to get a fresh seeded database on the next request.
 - `v_weekly_habit_summary` — the 7-day view the dashboard reads.
 - `consistency_pct(start_date, end_date, habit_id)` — ghost-excluded percentage,
   returns `NULL` when a window has no eligible days.
+- `current_user_id()` — resolves the caller from the JWT claim (Supabase) or the
+  `app.user_id` setting (plain Postgres, tests).
+
+### Per-user isolation
+
+Row Level Security is on for `users`, `habits`, `daily_logs` and
+`bounce_back_events`: a habit is visible only when `user_id = current_user_id()`,
+and a log is visible only through a habit the caller owns. The view is
+`security_invoker`, so it cannot be used to read around the policies.
+
+Table owners bypass RLS, so the app does not query as the owner: `src/lib/scope.ts`
+puts every read and write inside a transaction that assumes the `authenticated`
+role and publishes the user id — the same posture Supabase gives a signed-in user.
+Both settings are transaction-local, so two accounts can share one connection.
+
+`verify-schema.mjs` asserts this from the database's side, as a second account:
+no rows from the first account are visible, an inserted log against its habits is
+rejected by the policy, and an `UPDATE` that would pause its day matches nothing.
 
 A **keystone save** (keystone done, every other habit missed) is a read-time
 concept — it needs no table, just the week's rows.

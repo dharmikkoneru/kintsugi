@@ -1,7 +1,7 @@
 // The write path. Same shape as the read path: plain SQL against a database
 // handle, so the server actions are thin wrappers and the rules stay testable
 // without a Next runtime.
-import type { PGlite } from "@electric-sql/pglite";
+import type { SqlClient } from "./scope.ts";
 
 /** How far forward to repair bounce-backs after history changes. */
 const RESYNC_WINDOW_DAYS = 14;
@@ -19,11 +19,13 @@ interface DayRow {
   is_ghost: boolean;
 }
 
-async function dayRows(db: PGlite, isoDay: string): Promise<DayRow[]> {
+async function dayRows(db: SqlClient, isoDay: string): Promise<DayRow[]> {
   const { rows } = await db.query<DayRow>(
-    `SELECT habit_id, to_char(day, 'YYYY-MM-DD') AS day, completed, is_ghost
-     FROM daily_logs
-     WHERE day = $1::date`,
+    `SELECT dl.habit_id, to_char(dl.day, 'YYYY-MM-DD') AS day, dl.completed, dl.is_ghost
+     FROM daily_logs dl
+     JOIN habits h ON h.id = dl.habit_id
+     WHERE dl.day = $1::date
+       AND h.user_id = current_user_id()`,
     [isoDay],
   );
   return rows;
@@ -36,11 +38,21 @@ async function dayRows(db: PGlite, isoDay: string): Promise<DayRow[]> {
  * that, and this returns a readable reason before the constraint has to.
  */
 export async function toggleHabit(
-  db: PGlite,
+  db: SqlClient,
   habitId: string,
   isoDay: string,
   completed: boolean,
 ): Promise<MutationResult> {
+  // Ownership first: a habit id from another account must read as "no such
+  // habit" rather than as a row RLS happens to hide.
+  const owned = await db.query<{ id: string }>(
+    "SELECT id FROM habits WHERE id = $1",
+    [habitId],
+  );
+  if (!owned.rows[0]) {
+    return { ok: false, reason: "That habit does not exist on this account." };
+  }
+
   const { rows } = await db.query<{ is_ghost: boolean }>(
     "SELECT is_ghost FROM daily_logs WHERE habit_id = $1 AND day = $2::date",
     [habitId, isoDay],
@@ -73,7 +85,7 @@ export async function toggleHabit(
  * product, so every habit for that day moves together.
  */
 export async function setGhostDay(
-  db: PGlite,
+  db: SqlClient,
   isoDay: string,
   isGhost: boolean,
 ): Promise<MutationResult> {
@@ -85,9 +97,12 @@ export async function setGhostDay(
   // Only the flag moves: whatever the user had logged that day stays in the
   // row and comes back untouched when the day is resumed.
   await db.query(
-    `UPDATE daily_logs
+    `UPDATE daily_logs dl
      SET is_ghost = $2, updated_at = now()
-     WHERE day = $1::date`,
+     FROM habits h
+     WHERE h.id = dl.habit_id
+       AND dl.day = $1::date
+       AND h.user_id = current_user_id()`,
     [isoDay, isGhost],
   );
 

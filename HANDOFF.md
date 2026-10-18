@@ -8,13 +8,22 @@ Current state, for orientation: the dashboard runs at
 ESLint and `next build` are clean, and **the folder is not a git repository yet**
 (no `.git`, no remote).
 
+**Status:** steps 1 and 2 are done. The repo is public at
+<https://github.com/dharmikkoneru/kintsugi>, and CI run #2 on `14aac26` passed
+every step — install, lint, the three database suites, build, Chromium install,
+and both browser suites — on a clean Ubuntu runner. Steps 3 onward are open.
+
 Do these in order. Each one unblocks the next.
 
 ---
 
-## 1. Put it in git (5 min) — unblocks CI
+## 1. Put it in git — DONE
 
-There is no repository here, so `.github/workflows/ci.yml` has never run.
+The repo is public at <https://github.com/dharmikkoneru/kintsugi>. Kept below as
+the record of what was run. First CI run failed at `Install` because the
+lockfile was missing `@emnapi/runtime@1.11.3` and `@emnapi/core@1.11.3` (optional
+wasm dependencies of `sharp` and `tailwindcss/oxide`); both entries were added
+with real registry integrity hashes in `14aac26`, and run #2 passed.
 
 ```bash
 cd kintsugi
@@ -46,7 +55,7 @@ there that passed here, the cause is almost certainly step 2.
 
 ---
 
-## 2. Reinstall dependencies on a normal network (5 min)
+## 2. Reinstall dependencies on a normal network — DONE (in CI)
 
 This is the highest-risk unknown. Installs time out on this machine, so
 `package-lock.json` was regenerated from registry metadata and `@electric-sql/pglite`,

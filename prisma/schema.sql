@@ -316,3 +316,97 @@ $$ LANGUAGE plpgsql;
 --   JOIN habits h ON h.id = b.habit_id
 --   WHERE h.user_id = :user_id
 --     AND b.bounced_on >= current_date - 6;
+
+-- ══════════════════════════════════════════════════════════════════════
+-- Per-user isolation
+-- ══════════════════════════════════════════════════════════════════════
+-- Who is asking? Supabase puts the signed-in user in the JWT claim; a plain
+-- Postgres connection (local PGlite, scripts, tests) sets `app.user_id` for the
+-- duration of a transaction. Both resolve to the same value, so every policy
+-- below behaves identically in production and in tests.
+CREATE OR REPLACE FUNCTION current_user_id() RETURNS UUID AS $$
+  SELECT COALESCE(
+    NULLIF(current_setting('request.jwt.claim.sub', true), '')::uuid,
+    NULLIF(current_setting('app.user_id', true), '')::uuid
+  );
+$$ LANGUAGE sql STABLE;
+
+-- `users.id` is the Supabase auth uid when an auth schema exists (it does not
+-- in PGlite, which is why this is conditional rather than an inline REFERENCES).
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = 'auth') THEN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'users_id_fkey_auth') THEN
+      ALTER TABLE users
+        ADD CONSTRAINT users_id_fkey_auth
+        FOREIGN KEY (id) REFERENCES auth.users(id) ON DELETE CASCADE;
+    END IF;
+  END IF;
+END $$;
+
+-- Row Level Security is the security boundary: a queries-level `WHERE user_id`
+-- is a convenience, the policy is what actually stops one account reading
+-- another's week. Table owners bypass RLS, so the app connects as `authenticated`.
+ALTER TABLE users              ENABLE ROW LEVEL SECURITY;
+ALTER TABLE habits             ENABLE ROW LEVEL SECURITY;
+ALTER TABLE daily_logs         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE bounce_back_events ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS users_self ON users;
+DROP POLICY IF EXISTS habits_owner ON habits;
+DROP POLICY IF EXISTS daily_logs_owner ON daily_logs;
+DROP POLICY IF EXISTS bounce_back_owner ON bounce_back_events;
+
+CREATE POLICY users_self ON users
+  USING (id = current_user_id())
+  WITH CHECK (id = current_user_id());
+
+CREATE POLICY habits_owner ON habits
+  USING (user_id = current_user_id())
+  WITH CHECK (user_id = current_user_id());
+
+-- Logs have no user_id of their own: ownership comes from the habit, which is
+-- also how the UI thinks about them.
+CREATE POLICY daily_logs_owner ON daily_logs
+  USING (EXISTS (
+    SELECT 1 FROM habits h
+    WHERE h.id = daily_logs.habit_id AND h.user_id = current_user_id()
+  ))
+  WITH CHECK (EXISTS (
+    SELECT 1 FROM habits h
+    WHERE h.id = daily_logs.habit_id AND h.user_id = current_user_id()
+  ));
+
+CREATE POLICY bounce_back_owner ON bounce_back_events
+  USING (EXISTS (
+    SELECT 1 FROM habits h
+    WHERE h.id = bounce_back_events.habit_id AND h.user_id = current_user_id()
+  ))
+  WITH CHECK (EXISTS (
+    SELECT 1 FROM habits h
+    WHERE h.id = bounce_back_events.habit_id AND h.user_id = current_user_id()
+  ));
+
+-- A view owned by a bypass-RLS role would leak every user's rows; security_invoker
+-- makes it run with the caller's rights, so the policies above still apply.
+ALTER VIEW v_weekly_habit_summary SET (security_invoker = true);
+
+-- The role the app's queries run under. Supabase defines `authenticated`; this
+-- keeps a local database behaving the same way instead of silently bypassing RLS.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    CREATE ROLE authenticated NOLOGIN;
+  END IF;
+END $$;
+
+GRANT USAGE ON SCHEMA public TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO authenticated;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO authenticated;
+-- Functions are SECURITY INVOKER, so they need the same table rights, not more.
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO authenticated;
+
+-- ── What this does NOT do ─────────────────────────────────────────────
+-- Sign-in itself (Supabase Auth) is not represented here: `users` rows are
+-- created by the signup path with id = auth uid. Profile rows are not
+-- auto-created by a trigger yet, so the app upserts one after first sign-in.
